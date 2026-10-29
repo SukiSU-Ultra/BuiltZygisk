@@ -1,12 +1,10 @@
 const PROP_PATH = "/data/adb/nyazygisk/module.prop";
 const CONFIG_PATH = "/data/adb/nyazygisk/config.prop";
 const CONFIG_DIR = "/data/adb/nyazygisk";
-const PACKAGES_LIST_PATH = "/data/system/packages.list";
 const MODULE_MARKER = "@@NZMOD@@ ";
 const LANG_STORAGE_KEY = "nyazygisk.lang";
 const GOOD_STATUSES = new Set(["running", "injected", "tracing"]);
 const BAD_STATUSES = new Set(["stopped", "exited", "crashed", "not_injected"]);
-const PACKAGE_RE = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$/;
 
 const I18N = {
   en: {
@@ -231,13 +229,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  document.querySelector(".tabbar").addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-tab]");
-    if (button) {
-      setTab(button.dataset.tab);
-    }
-  });
-
   $("btn-reload").addEventListener("click", () => {
     refresh(true);
   });
@@ -247,27 +238,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("custom-linker").addEventListener("change", (event) => {
     saveToggle(event.target, "custom_linker");
   });
-  $("exclude-unmount").addEventListener("change", (event) => {
-    saveToggle(event.target, "exclude_unmount");
-  });
-  $("app-search").addEventListener("input", () => {
-    renderApps();
-  });
-  $("app-filter").addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-filter]");
-    if (button) {
-      appFilter = button.dataset.filter;
-      renderApps();
-    }
-  });
-  $("app-list").addEventListener("change", (event) => {
-    const input = event.target;
-    if (input && input.dataset && input.dataset.pkg) {
-      toggleApp(input.dataset.pkg, input.checked);
-    }
-  });
 
-  setTab(currentTab);
   applyTranslations();
   refresh(false);
 });
@@ -315,21 +286,10 @@ function applyTranslations() {
   });
 
   renderOverview();
-  renderApps();
 }
 
 function setTab(tab) {
-  currentTab = tab;
-  $("view-overview").hidden = tab !== "overview";
-  $("view-apps").hidden = tab !== "apps";
-  document.querySelectorAll(".tabbar button").forEach((button) => {
-    if (button.dataset.tab === tab) {
-      button.setAttribute("aria-current", "page");
-    } else {
-      button.removeAttribute("aria-current");
-    }
-  });
-  window.scrollTo(0, 0);
+  // no-op without tabs
 }
 
 function parseProp(text) {
@@ -757,20 +717,6 @@ async function refresh(showSuccessToast) {
       const config = parseProp(sections.config);
       $("anonymous-memory").checked = config.anonymous_memory === "1";
       $("custom-linker").checked = config.custom_linker === "1";
-      $("exclude-unmount").checked = config.exclude_unmount !== "0";
-      savedExcluded = new Set(
-        (config.exclude_apps || "").split(",").map((p) => p.trim()).filter(Boolean),
-      );
-      excludedApps = new Set(savedExcluded);
-      if (!initialExcluded) {
-        initialExcluded = new Set(savedExcluded);
-      }
-    }
-
-    if (appsState !== "ready" || showSuccessToast) {
-      await loadApps();
-    } else {
-      renderApps();
     }
 
     if (showSuccessToast) {
@@ -864,221 +810,5 @@ async function saveToggle(input, key) {
     showToast("save_failed", true);
     return;
   }
-  showToast("saved");
-}
-
-// ---------------------------------------------------------------------------
-// App exclusion
-
-function appsCommand() {
-  return [
-    'pm list packages -3 2>/dev/null',
-    'echo "---UIDS---"',
-    `cut -d' ' -f1,2 ${PACKAGES_LIST_PATH} 2>/dev/null`,
-  ].join("\n");
-}
-
-// Uses the KernelSU WebUI package API for display names when the manager provides it.
-function loadAppLabels(packages) {
-  const bridge = window.ksu;
-  if (!bridge || typeof bridge.getPackagesInfo !== "function" || !packages.length) {
-    return {};
-  }
-  try {
-    const info = JSON.parse(bridge.getPackagesInfo(JSON.stringify(packages)));
-    const labels = {};
-    (Array.isArray(info) ? info : []).forEach((item) => {
-      if (item && item.packageName && item.appLabel) {
-        labels[item.packageName] = String(item.appLabel);
-      }
-    });
-    return labels;
-  } catch (_) {
-    return {};
-  }
-}
-
-async function loadApps() {
-  const exec = getExec();
-  if (!exec) {
-    return;
-  }
-
-  const result = await exec(appsCommand());
-  if (result.code !== 0 && !result.stdout) {
-    appsState = "failed";
-    renderApps();
-    showToast("apps_failed", true);
-    return;
-  }
-
-  const [pmPart, uidPart = ""] = result.stdout.split("---UIDS---");
-  const packages = pmPart
-    .split(/\r?\n/)
-    .map((line) => line.trim().replace(/^package:/, ""))
-    .filter((pkg) => PACKAGE_RE.test(pkg));
-
-  // Mirror the daemon: packages sharing an app id are excluded together or not at all.
-  const appIdOf = new Map();
-  appIdGroups = new Map();
-  uidPart.split(/\r?\n/).forEach((line) => {
-    const [pkg, uid] = line.trim().split(/\s+/);
-    const appId = Number(uid) % 100000;
-    if (!pkg || !Number.isFinite(appId)) {
-      return;
-    }
-    appIdOf.set(pkg, appId);
-    if (appId >= 10000 && appId <= 19999) {
-      if (!appIdGroups.has(appId)) {
-        appIdGroups.set(appId, []);
-      }
-      appIdGroups.get(appId).push(pkg);
-    }
-  });
-  userPackages = new Set(packages);
-
-  const labels = loadAppLabels(packages);
-  userApps = packages.map((pkg) => ({
-    pkg,
-    label: labels[pkg] || "",
-    appId: appIdOf.has(pkg) ? appIdOf.get(pkg) : null,
-  }));
-  appsState = "ready";
-  renderApps();
-}
-
-function groupOf(app) {
-  const group = app.appId !== null ? appIdGroups.get(app.appId) : null;
-  return group && group.length ? group : [app.pkg];
-}
-
-// An app whose UID is shared with a system package cannot be excluded: the daemon excludes
-// a UID only when every package on it is listed, and system packages must never be listed.
-function isLocked(app) {
-  return groupOf(app).some((pkg) => !userPackages.has(pkg));
-}
-
-function excludedUserCount() {
-  if (appsState !== "ready") {
-    return excludedApps.size;
-  }
-  return userApps.filter((app) => excludedApps.has(app.pkg) && !isLocked(app)).length;
-}
-
-function isPending(pkg) {
-  return Boolean(initialExcluded) && excludedApps.has(pkg) !== initialExcluded.has(pkg);
-}
-
-function renderAppCounts() {
-  const excluded = excludedUserCount();
-  $("v-excluded-count").textContent = String(excluded);
-  const filterButtons = $("app-filter").querySelectorAll("button");
-  filterButtons[0].textContent = `${t("filter_all")} ${appsState === "ready" ? userApps.length : ""}`.trim();
-  filterButtons[1].textContent = `${t("filter_excluded")} ${excluded}`;
-  filterButtons.forEach((button) => {
-    button.setAttribute("aria-pressed", String(button.dataset.filter === appFilter));
-  });
-}
-
-function renderApps() {
-  const list = $("app-list");
-  renderAppCounts();
-
-  if (appsState !== "ready") {
-    const key = appsState === "failed" ? "apps_failed" : "apps_loading";
-    list.innerHTML = `<p class="empty">${escapeHtml(t(key))}</p>`;
-    return;
-  }
-
-  const query = $("app-search").value.trim().toLowerCase();
-  const apps = userApps
-    .filter((app) => appFilter === "all" || (excludedApps.has(app.pkg) && !isLocked(app)))
-    .filter((app) => !query || app.pkg.toLowerCase().includes(query) || app.label.toLowerCase().includes(query))
-    .sort((a, b) => (excludedApps.has(b.pkg) - excludedApps.has(a.pkg))
-      || (a.label || a.pkg).localeCompare(b.label || b.pkg));
-
-  if (!apps.length) {
-    const key = userApps.length ? "apps_no_match" : "apps_none";
-    list.innerHTML = `<p class="empty">${escapeHtml(t(key))}</p>`;
-    return;
-  }
-
-  list.innerHTML = apps.map((app) => {
-    const title = app.label || app.pkg;
-    const initial = (title.replace(/^[^A-Za-z0-9\p{L}]+/u, "").charAt(0) || "?").toUpperCase();
-    const shared = groupOf(app).length - 1;
-    const locked = isLocked(app);
-    let note = "";
-    if (locked) {
-      note = t("shared_uid_system");
-    } else if (shared > 0) {
-      note = t("shared_uid", { n: shared });
-    }
-    return `
-      <label class="toggle-row app-row">
-        <input type="checkbox" role="switch" data-pkg="${escapeHtml(app.pkg)}"${excludedApps.has(app.pkg) && !locked ? " checked" : ""}${locked ? " disabled" : ""}>
-        <span class="avatar" aria-hidden="true">${escapeHtml(initial)}</span>
-        <span class="app-text">
-          <span class="app-title">
-            <span class="app-label">${escapeHtml(title)}</span>
-            <span class="badge badge-warn" data-pending-for="${escapeHtml(app.pkg)}"${isPending(app.pkg) ? "" : " hidden"}>${escapeHtml(t("pending_restart"))}</span>
-          </span>
-          ${app.label ? `<span class="app-pkg">${escapeHtml(app.pkg)}</span>` : ""}
-          ${note ? `<span class="app-note">${escapeHtml(note)}</span>` : ""}
-        </span>
-        <span class="switch" aria-hidden="true"></span>
-      </label>
-    `;
-  }).join("");
-}
-
-// Updates rows in place instead of re-rendering, so a toggled row does not jump away
-// from under the user's finger when the list re-sorts.
-function syncAppRows(packages) {
-  packages.forEach((pkg) => {
-    const input = $("app-list").querySelector(`input[data-pkg="${CSS.escape(pkg)}"]`);
-    if (input) {
-      input.checked = excludedApps.has(pkg);
-    }
-    const badge = $("app-list").querySelector(`[data-pending-for="${CSS.escape(pkg)}"]`);
-    if (badge) {
-      badge.hidden = !isPending(pkg);
-    }
-  });
-  renderAppCounts();
-}
-
-async function toggleApp(pkg, excluded) {
-  const app = userApps.find((item) => item.pkg === pkg) || { pkg, appId: null };
-  if (isLocked(app)) {
-    return;
-  }
-  const group = groupOf(app);
-  group.forEach((member) => {
-    if (excluded) {
-      excludedApps.add(member);
-    } else {
-      excludedApps.delete(member);
-    }
-  });
-  syncAppRows(group);
-
-  // Drop packages that are no longer installed so the list never holds invisible entries.
-  let written = "";
-  const result = await queueConfigWrite("exclude_apps", () => {
-    written = [...excludedApps]
-      .filter((p) => userPackages.has(p) && PACKAGE_RE.test(p))
-      .sort()
-      .join(",");
-    return written;
-  });
-
-  if (result.code !== 0) {
-    excludedApps = new Set(savedExcluded);
-    renderApps();
-    showToast("save_failed", true);
-    return;
-  }
-  savedExcluded = new Set(written ? written.split(",") : []);
   showToast("saved");
 }

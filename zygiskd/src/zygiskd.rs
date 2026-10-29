@@ -10,7 +10,6 @@
 //!   and managing companion processes.
 
 use crate::constants::{self, DaemonSocketAction, ProcessFlags, ZKSU_VERSION};
-use crate::exclude;
 use crate::mount::{MountNamespace, MountNamespaceManager};
 use crate::utils::{self, UnixStreamExt};
 use crate::{lp_select, root_impl};
@@ -142,7 +141,6 @@ pub fn main(tmp_path: Option<&str>) -> Result<()> {
         zn_states: Mutex::new(HashMap::new()),
     });
     let listener = create_daemon_socket()?;
-    spawn_config_watcher();
 
     info!("Daemon listening on {}", DAEMON_SOCKET_PATH.get().unwrap());
 
@@ -581,12 +579,6 @@ fn handle_get_process_flags(stream: &mut UnixStream) -> Result<()> {
         }
         if root_impl::uid_should_umount(uid) {
             flags |= ProcessFlags::PROCESS_ON_DENYLIST;
-        }
-        if let Some(unmount) = u32::try_from(uid).ok().and_then(exclude::lookup) {
-            flags |= ProcessFlags::PROCESS_EXCLUDED;
-            if unmount {
-                flags |= ProcessFlags::PROCESS_ON_DENYLIST;
-            }
         }
     }
 
@@ -1073,46 +1065,7 @@ fn initialize_shared_memory() -> Result<()> {
     Ok(())
 }
 
-/// Drops every cached entry so the next `GetProcessFlags` of each uid reaches the daemon.
-fn invalidate_process_flag_cache() {
-    if let Some(shm) = SHARED_MEMORY.get() {
-        let _guard = shm.write_lock.lock().unwrap();
-        let layout = shm.layout();
-        let base_version = layout.version.load(Ordering::Relaxed);
-        layout
-            .version
-            .store(base_version.wrapping_add(1), Ordering::Relaxed);
-        fence(Ordering::Release);
 
-        for entry in layout.entries.iter() {
-            entry.uid.store(u32::MAX, Ordering::Relaxed);
-            entry.flags.store(0, Ordering::Relaxed);
-        }
-
-        layout
-            .version
-            .store(base_version.wrapping_add(2), Ordering::Release);
-    }
-}
-
-/// Flushes the flag cache whenever the WebUI rewrites `config.prop`; otherwise a cached
-/// answer would keep serving the old exclusion list until the daemon restarts.
-fn spawn_config_watcher() {
-    thread::spawn(|| {
-        let mut last = exclude::config_mtime();
-        loop {
-            thread::sleep(std::time::Duration::from_secs(1));
-            let current = exclude::config_mtime();
-            if current != last {
-                last = current;
-                // Re-read first so a miss right after the flush sees the new list.
-                exclude::refresh();
-                invalidate_process_flag_cache();
-                debug!("config.prop changed, process flag cache flushed");
-            }
-        }
-    });
-}
 
 fn cache_process_flags(uid: u32, flags: u32) {
     if let Some(shm) = SHARED_MEMORY.get() {

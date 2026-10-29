@@ -120,7 +120,6 @@ fi
 
 ui_print "- Extracting module files"
 extract "$ZIPFILE" 'module.prop'               "$MODPATH"
-extract "$ZIPFILE" 'spoof.prop'                "$MODPATH"
 extract "$ZIPFILE" 'post-fs-data.sh'           "$MODPATH"
 extract "$ZIPFILE" 'late-load.sh'              "$MODPATH"
 extract "$ZIPFILE" 'post-mount.sh'             "$MODPATH"

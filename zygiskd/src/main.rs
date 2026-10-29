@@ -76,7 +76,6 @@
 mod companion;
 mod constants;
 mod dl;
-mod exclude;
 mod mount;
 mod root_impl;
 mod utils;
